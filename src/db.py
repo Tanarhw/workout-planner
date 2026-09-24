@@ -24,6 +24,16 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_logs (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                log_date   TEXT NOT NULL,
+                session_type TEXT NOT NULL,
+                title      TEXT NOT NULL,
+                log_json   TEXT NOT NULL,
+                logged_at  TEXT NOT NULL
+            )
+        """)
         conn.commit()
 
 
@@ -56,6 +66,38 @@ def list_plans(limit: int = 10) -> list[dict]:
             (limit,)
         ).fetchall()
     return [{"week_start": r["week_start"], **json.loads(r["plan_json"])} for r in rows]
+
+
+def save_session_log(log_date: date, session_type: str, title: str, log: list[dict]) -> None:
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO session_logs (log_date, session_type, title, log_json, logged_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (log_date.isoformat(), session_type, title, json.dumps(log), datetime.utcnow().isoformat()))
+        conn.commit()
+
+
+def get_last_session_log(session_type: str, title: str) -> Optional[dict]:
+    """Return the most recent log for a given session title."""
+    with db() as conn:
+        row = conn.execute("""
+            SELECT log_json, log_date FROM session_logs
+            WHERE title LIKE ?
+            ORDER BY log_date DESC LIMIT 1
+        """, (f"%{title.split('(')[0].strip()}%",)).fetchone()
+    if row:
+        return {"date": row["log_date"], "exercises": json.loads(row["log_json"])}
+    return None
+
+
+def list_session_logs(limit: int = 20) -> list[dict]:
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT log_date, title, log_json, logged_at
+            FROM session_logs ORDER BY log_date DESC LIMIT ?
+        """, (limit,)).fetchall()
+    return [{"date": r["log_date"], "title": r["title"],
+             "exercises": json.loads(r["log_json"]), "logged_at": r["logged_at"]} for r in rows]
 
 
 def mark_session_done(week_start: date, session_date: str, session_type: str, done: bool = True) -> bool:

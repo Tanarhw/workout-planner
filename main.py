@@ -4,8 +4,11 @@ Workout Planner CLI
 Commands:
   auth          Set up Google Calendar OAuth to pull Runna runs
   ticktick-auth Set up TickTick OAuth to push plans as tasks
+  strava-auth   Set up Strava OAuth to sync completed runs
   plan          Generate an AI lifting plan around your runs and BJJ
   push          Push a saved week plan to TickTick
+  log           Log weights from a completed session
+  logs          Show recent weight logs
   view          View a saved week plan
   done          Mark sessions as completed
   history       Show past weeks
@@ -385,6 +388,129 @@ def push(
         console.print(f"[green]✓[/green] {title}")
 
     console.print(f"\n[green]{len(created)} tasks created in TickTick.[/green]")
+
+
+@app.command("strava-auth")
+def strava_auth() -> None:
+    """Set up Strava OAuth to sync completed runs and log workouts."""
+    from src.strava.client import authenticate, is_authenticated
+
+    console.print(Panel(
+        "[bold]Strava OAuth Setup[/bold]\n\n"
+        "This syncs completed runs with real pace/HR data and lets you log\n"
+        "strength sessions to Strava automatically.\n\n"
+        "[bold]Steps:[/bold]\n"
+        "  1. Go to [cyan]https://www.strava.com/settings/api[/cyan]\n"
+        "  2. Create an application — set Callback Domain to [bold]localhost[/bold]\n"
+        "  3. Copy your [bold]Client ID[/bold] and [bold]Client Secret[/bold]\n"
+        "  4. Add them to your shell profile:\n"
+        "     [dim]export STRAVA_CLIENT_ID=your_id[/dim]\n"
+        "     [dim]export STRAVA_CLIENT_SECRET=your_secret[/dim]\n"
+        "  5. Run [bold]source ~/.zshrc[/bold] then [bold]workout strava-auth[/bold] again",
+        border_style="orange3",
+        title="Setup",
+    ))
+
+    if not os.environ.get("STRAVA_CLIENT_ID") or not os.environ.get("STRAVA_CLIENT_SECRET"):
+        console.print("\n[yellow]STRAVA_CLIENT_ID / STRAVA_CLIENT_SECRET not set yet.[/yellow]")
+        raise typer.Exit(1)
+
+    console.print("\n[dim]Opening browser for Strava OAuth...[/dim]")
+    if authenticate():
+        console.print("[green]Strava connected.[/green]")
+    else:
+        console.print("[red]Authentication failed.[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def log(
+    week: Annotated[Optional[str], typer.Option("--week", "-w", help="Week start date YYYY-MM-DD")] = None,
+    to_strava: Annotated[bool, typer.Option("--strava", help="Log session to Strava")] = False,
+) -> None:
+    """Log weights from a completed lift session."""
+    from src.db import save_session_log, get_last_session_log
+
+    week_start = _resolve_week(week)
+    plan_data = get_plan(week_start)
+    if not plan_data:
+        console.print(f"[yellow]No plan for week of {week_start}.[/yellow]")
+        raise typer.Exit(1)
+
+    lift_sessions = [s for s in plan_data["sessions"]
+                     if s["type"] == "lift" and s.get("details", {}).get("exercises")]
+
+    if not lift_sessions:
+        console.print("[yellow]No lift sessions with exercises found this week.[/yellow]")
+        raise typer.Exit(1)
+
+    from rich.table import Table
+    table = Table(box=None, show_header=False, padding=(0, 1))
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Session")
+    for i, s in enumerate(lift_sessions, 1):
+        table.add_row(str(i), f"[green]{s['title']}[/green] — {s['date']}")
+    console.print(table)
+
+    choice = Prompt.ask("Which session", default="1").strip()
+    try:
+        session = lift_sessions[int(choice) - 1]
+    except (ValueError, IndexError):
+        console.print("[red]Invalid selection.[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"\n[bold]Logging: {session['title']} ({session['date']})[/bold]")
+    console.print("[dim]Enter weight used for each exercise (blank to skip)[/dim]\n")
+
+    log_entries = []
+    for ex in session["details"]["exercises"]:
+        last = get_last_session_log(session["type"], ex["name"])
+        last_hint = f" [dim](last: {last['exercises'][0]['weight']})[/dim]" if last and last.get("exercises") else ""
+        weight = Prompt.ask(
+            f"  [green]{ex['name']}[/green]{last_hint} — weight",
+            default=""
+        ).strip()
+        if not weight:
+            continue
+        reps = Prompt.ask(f"    reps/sets completed", default=f"{ex['sets']}×{ex['reps']}").strip()
+        log_entries.append({"name": ex["name"], "weight": weight, "reps_done": reps})
+
+    if not log_entries:
+        console.print("[dim]Nothing logged.[/dim]")
+        return
+
+    save_session_log(date.fromisoformat(session["date"]), session["type"], session["title"], log_entries)
+    console.print(f"\n[green]✓ Logged {len(log_entries)} exercises for {session['title']}[/green]")
+
+    if to_strava or Confirm.ask("Log this session to Strava?", default=False):
+        from src.strava.client import is_authenticated as strava_authed, log_workout_to_strava
+        if not strava_authed():
+            console.print("[yellow]Strava not connected — run [bold]workout strava-auth[/bold][/yellow]")
+        else:
+            desc = "\n".join(f"{e['name']}: {e['weight']} × {e['reps_done']}" for e in log_entries)
+            strava_id = log_workout_to_strava(session["title"], date.fromisoformat(session["date"]),
+                                              description=desc)
+            if strava_id:
+                console.print(f"[green]✓ Logged to Strava (activity {strava_id})[/green]")
+            else:
+                console.print("[yellow]Strava log failed — check connection.[/yellow]")
+
+
+@app.command()
+def logs() -> None:
+    """Show recent weight logs."""
+    from src.db import list_session_logs
+    entries = list_session_logs(limit=20)
+    if not entries:
+        console.print("[dim]No sessions logged yet. Run [bold]workout log[/bold] after a session.[/dim]")
+        return
+
+    from rich.table import Table
+    from rich import box as rich_box
+    for entry in entries:
+        console.print(f"\n[bold]{entry['date']} — {entry['title']}[/bold]")
+        for ex in entry["exercises"]:
+            console.print(f"  [green]{ex['name']}[/green] — {ex['weight']} × {ex['reps_done']}")
 
 
 if __name__ == "__main__":

@@ -6,28 +6,54 @@ import anthropic
 
 USER_PROFILE = """
 User Profile:
-- Goal: Hypertrophy (muscle growth focus — 3-4 sets, 8-15 reps per exercise)
-- Training frequency: 5-6 days/week active across running, BJJ, and lifting
+- Primary goal (current phase): UPPER BODY HYPERTROPHY — build size and look great for summer. Think Jeff Nippard, Mike Israetel, AthleanX philosophy: evidence-based progressive overload, high stimulus-to-fatigue ratio exercises, full ROM, mind-muscle connection, weekly volume in the MAV range per muscle group
+- Secondary goal: functional strength that transfers to BJJ — pulling strength (rows, pull-ups) for grips/clinch, rotator cuff health, lat strength for guard, core stability
+- Running is reduced to easy maintenance mileage only for the next several weeks — legs are low priority
+- Training frequency: 5-6 days/week active across BJJ and lifting (minimal running)
 - Gym (Bay Club SF): Full commercial gym — barbells, cables, machines, full dumbbell rack
-- Home: Dumbbells up to 30lb, two 45lb kettlebells, 30lb ruck plate (for weighted carries/squats), pull-up bar, resistance bands
+- Home: Dumbbells up to 30lb, two 45lb kettlebells, 30lb ruck plate, pull-up bar, resistance bands
 - Travel: Resistance bands + bodyweight only
 """
 
-SYSTEM_PROMPT = f"""You are a strength and conditioning coach building hypertrophy-focused weekly lifting plans.
+SYSTEM_PROMPT = f"""You are an evidence-based strength and hypertrophy coach, drawing on Jeff Nippard, Mike Israetel, and AthleanX principles.
 
 {USER_PROFILE}
 
 Programming rules:
-- Hypertrophy rep ranges: 8-15 reps, 3-4 working sets per exercise
-- 4-6 exercises per session
-- NEVER schedule heavy quad-dominant work (squats, leg press) the day before a long run (>10km)
-- BJJ counts as full-body — avoid heavy compound upper work the same day as evening BJJ; keep it light or lower body
-- Ensure at least one full rest day per week
-- Use Push/Pull/Legs or Upper/Lower split depending on available lifting days
-- At home: use dumbbells, kettlebells, ruck carries, pull-up bar variations only
-- At the gym: mix barbells, cables, and machines for variety and joint health
-- Return 2-4 lifting sessions; fewer if run/BJJ volume is high that week
+- Upper body is the PRIORITY. Bias toward chest, back, shoulders, arms every week
+- Hypertrophy rep ranges: 8-15 reps, 3-4 working sets per exercise. Use heavier compounds (6-10) and lighter isolation (12-20)
+- 5-7 exercises per session for gym sessions, 4-5 for home
+- Weekly volume targets (approximate): Chest 12-16 sets, Back 14-18 sets, Shoulders 12-16 sets, Biceps 10-14 sets, Triceps 10-14 sets — spread across the week
+- Include high SFR exercises: cables and machines for isolation (constant tension), barbells/dumbbells for compounds
+- BJJ-specific: prioritize rows, pull-ups, face pulls, and rotator cuff work — these directly carry over to grappling
+- BJJ counts as significant upper-body fatigue — on BJJ days keep lifting lighter and avoid crushing the same muscles
+- Legs: only include if there's a clear open day with no run or BJJ the next day — not a priority this phase
+- ABS: always include 2 ab exercises at the end of every lift session. Rotate through: Cable Crunch, Hanging Leg Raise, Ab Wheel Rollout, Plank, Hollow Body Hold, Bicycle Crunch. 3 sets each, 10-20 reps
+- NEVER schedule heavy legs the day after a race or long run
+- At home: dumbbells, kettlebells, pull-up bar variations, bands
+- At the gym: mix cables, machines, and free weights for variety and joint health
+- Return 3-5 lifting sessions per week when schedule allows
 """
+
+
+def _build_weight_context() -> str:
+    """Pull recent session logs and format as context for Claude."""
+    try:
+        from src.db import list_session_logs
+        logs = list_session_logs(limit=10)
+        if not logs:
+            return ""
+        lines = ["Recent logged weights (use for progressive overload notes):"]
+        for log in logs:
+            lines.append(f"\n  {log['date']} — {log['title']}")
+            for ex in log["exercises"]:
+                weight = ex.get("weight", "")
+                reps = ex.get("reps_done", "")
+                if weight:
+                    lines.append(f"    • {ex['name']}: {weight}" + (f" × {reps}" if reps else ""))
+        return "\n".join(lines)
+    except Exception:
+        return ""
 
 
 def generate_plan(
@@ -61,6 +87,8 @@ def generate_plan(
         for i in range(7)
     ]
 
+    weight_context = _build_weight_context()
+
     user_message = f"""Plan lifting sessions for the week of {week_start.strftime('%B %d, %Y')}.
 
 Week dates:
@@ -74,6 +102,7 @@ Scheduled BJJ:
 
 Lifting location preference: {location_pref}
 {f'Additional notes: {extra_notes}' if extra_notes else ''}
+{weight_context}
 
 Generate 2-4 lifting sessions. Return a JSON object with exactly this structure (no markdown, raw JSON only):
 {{
@@ -98,12 +127,13 @@ Generate 2-4 lifting sessions. Return a JSON object with exactly this structure 
 
     response = client.messages.create(
         model="claude-opus-4-8",
-        max_tokens=2000,
+        max_tokens=6000,
+        thinking={"type": "enabled", "budget_tokens": 3000},
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )
 
-    raw = response.content[0].text.strip()
+    raw = next((b.text for b in response.content if b.type == "text"), "").strip()
     if raw.startswith("```"):
         parts = raw.split("```")
         raw = parts[1]

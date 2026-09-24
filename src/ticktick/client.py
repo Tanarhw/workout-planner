@@ -136,8 +136,9 @@ def _parse_class_time(time_str: str, d: date) -> str:
         hour += 12
     elif period == "AM" and hour == 12:
         hour = 0
-    # Format in local time with PDT offset (-07:00)
-    return f"{d.isoformat()}T{hour:02d}:{minute:02d}:00-07:00"
+    # Use +00:00 so TickTick stores/displays on the correct calendar date
+    # (PDT offset causes PM times to cross midnight UTC and land on wrong day)
+    return f"{d.isoformat()}T{hour:02d}:{minute:02d}:00+00:00"
 
 
 def push_week_plan(plan: dict, project_name: str = "Workouts") -> list[str]:
